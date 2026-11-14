@@ -50,6 +50,19 @@ def test_compose_includes_session_id_after_prefix():
     assert prompt.index("Session ID: SES-C9") > len(static_prefix())
 
 
+def test_compose_includes_todays_date_after_prefix():
+    # The live Gemini demo booked a slot in May 2025 because the model
+    # had no current date and guessed "next week" from training
+    # knowledge. The date now comes from the system clock, in the
+    # dynamic part of the prompt — never inside the static prefix.
+    from datetime import date
+
+    prompt = compose_system_prompt("SES-C9")
+    assert f"Today is {date.today():%A, %B %d, %Y}" in prompt
+    assert prompt.index("Today is") > len(static_prefix())
+    assert "Today is" not in static_prefix()
+
+
 def test_cache_metrics_from_usage():
     usage = {"prompt_tokens": 4000, "completion_tokens": 120, "prompt_tokens_details": {"cached_tokens": 3000}}
     metrics = extract_cache_metrics("openai", "openai/gpt-4o-mini", usage)

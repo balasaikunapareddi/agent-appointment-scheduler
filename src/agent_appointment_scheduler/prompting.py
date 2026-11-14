@@ -26,6 +26,7 @@ correctness feature: the agent works identically with caching off.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 from .models import INPUT_PRICE_PER_MILLION
 
@@ -75,8 +76,19 @@ def compose_system_prompt(
     prefix cache would never hit. Same for the rolling summary and the
     stored preferences: they change as the conversation goes on, so they
     are appended after the static part.
+
+    Today's date is also dynamic, for the same reason — and it is
+    essential, not decorative: the live Gemini demo showed the model
+    resolving "next week" to May 2025 (its training-era sense of "now")
+    and booking a slot in the past. The date comes from the system clock
+    here, never from the model.
     """
     parts = [static_prefix()]
+    parts.append(
+        f"\nToday is {date.today():%A, %B %d, %Y}. Use this date to resolve "
+        "relative dates like 'next week', 'Wednesday', or 'tomorrow' — "
+        "never guess the date from training knowledge."
+    )
     parts.append(
         f"\nSession ID: {session_id} — pass this as session_id to every "
         "stateful tool (search_providers, choose_provider, choose_slot, "
