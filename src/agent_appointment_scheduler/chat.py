@@ -10,6 +10,8 @@ booking card state plus the turn's cache metrics for the UI status area.
 
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -17,6 +19,29 @@ from .agent import scheduler_agent
 from .prompting import extract_cache_metrics
 from .scripted_model import ScriptedModel
 from .sessions import SessionStore
+
+logger = logging.getLogger(__name__)
+
+# Turn-level retries for provider rate limits (Gemini free tier: 15 req/min).
+# The model-level fallback in models.py only switches providers when the
+# primary fails *before* producing content; a 429 that lands mid-stream
+# surfaces as a MidStreamFallbackError and would otherwise kill the turn.
+# Retrying the turn after the provider's suggested delay keeps a long
+# conversation alive instead of crashing the demo or the UI chat.
+RATE_LIMIT_RETRY_DELAYS = (25.0, 30.0, 45.0)
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """True when an exception is a provider rate-limit / quota error."""
+    try:
+        from litellm.exceptions import MidStreamFallbackError, RateLimitError
+
+        if isinstance(exc, (RateLimitError, MidStreamFallbackError)):
+            return True
+    except ImportError:  # pragma: no cover - litellm ships with strands
+        pass
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text or "quota" in text or "resource_exhausted" in text
 
 
 def result_text(result) -> str:
@@ -91,8 +116,25 @@ class ChatService:
         agent, (ctx, hooks, skills_plugin) = self._get_agent(session_id)
         self._store.record_preferences_from_text(session_id, message)
         self._store.append_message(session_id, "user", message)
-        hooks.begin_turn()
-        result = agent(message)
+        result = None
+        for attempt in range(len(RATE_LIMIT_RETRY_DELAYS) + 1):
+            hooks.begin_turn()
+            try:
+                result = agent(message)
+                break
+            except Exception as exc:  # noqa: BLE001 - retry only rate limits
+                if not _is_rate_limit_error(exc) or attempt == len(RATE_LIMIT_RETRY_DELAYS):
+                    raise
+                delay = RATE_LIMIT_RETRY_DELAYS[attempt]
+                logger.warning(
+                    "Rate limit on turn %s (attempt %d/%d); retrying in %.0fs: %s",
+                    session_id,
+                    attempt + 1,
+                    len(RATE_LIMIT_RETRY_DELAYS) + 1,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
         reply = result_text(result)
         self._store.append_message(session_id, "assistant", reply)
         self._store.maybe_summarize(session_id)
