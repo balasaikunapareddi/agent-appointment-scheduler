@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from .agent import scheduler_agent
+from .crisis import crisis_reply, detect_crisis
 from .prompting import extract_cache_metrics
 from .scripted_model import ScriptedModel
 from .sessions import SessionStore
@@ -113,6 +114,17 @@ class ChatService:
 
     def chat(self, session_id: str, message: str) -> ChatReply:
         session_id = session_id or f"SES-{uuid.uuid4().hex[:8].upper()}"
+        # Crisis screen first: a deterministic check that runs before any
+        # agent or model is created, so an emergency can never be answered
+        # with a routine slot — or with model output at all. The turn is
+        # still recorded in the session history; nothing else happens:
+        # no tools, no booking, no preference extraction, no model call.
+        kind = detect_crisis(message)
+        if kind is not None:
+            reply = crisis_reply(kind)
+            self._store.append_message(session_id, "user", message)
+            self._store.append_message(session_id, "assistant", reply)
+            return ChatReply(session_id=session_id, reply=reply)
         agent, (ctx, hooks, skills_plugin) = self._get_agent(session_id)
         self._store.record_preferences_from_text(session_id, message)
         self._store.append_message(session_id, "user", message)
