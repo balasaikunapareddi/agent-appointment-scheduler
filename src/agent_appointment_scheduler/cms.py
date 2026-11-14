@@ -1,0 +1,247 @@
+"""CMS NPI Registry client (https://npiregistry.cms.hhs.gov/api/).
+
+Free, no key. Rules learned from the live API and encoded here:
+- ``state`` alone is rejected (error 07: "Field state requires additional
+  search criteria") — always combine it with city, taxonomy, or a name.
+- Specialties are taxonomy CODES, not words: pass e.g. 207RC0000X.
+- Responses may carry an ``Errors`` array instead of ``results``.
+- Retries with backoff, a hard timeout, and a 24h local cache. When CMS
+  is unreachable or returns an error, fall back to local seed providers
+  so the demo never dies — seed results are marked ``seed: true``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from importlib import resources
+
+import httpx
+
+from . import store
+
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://npiregistry.cms.hhs.gov/api/"
+VERSION = "2.1"
+TIMEOUT_SECONDS = 10.0
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+
+# Specialty name -> taxonomy code (NUCC). The display name is what the user
+# says; the code is what CMS searches on.
+SPECIALTIES: dict[str, str] = {
+    "cardiology": "207RC0000X",
+    "cardiovascular disease": "207RC0000X",
+    "cardiologist": "207RC0000X",
+    "family medicine": "207Q00000X",
+    "family practice": "207Q00000X",
+    "internal medicine": "207R00000X",
+    "internist": "207R00000X",
+    "obstetrics & gynecology": "207V00000X",
+    "ob/gyn": "207V00000X",
+    "obstetrics": "207V00000X",
+    "gynecology": "207V00000X",
+}
+
+DEFAULT_CITY = "Minneapolis"
+DEFAULT_STATE = "MN"
+
+
+def taxonomy_code_for(specialty: str) -> str | None:
+    """Resolve a spoken specialty to its taxonomy code, or None."""
+    if not specialty:
+        return None
+    return SPECIALTIES.get(specialty.strip().lower())
+
+
+def _load_seed_providers() -> list[dict]:
+    with (resources.files("agent_appointment_scheduler") / "data" / "seed_providers.json").open() as f:
+        return json.load(f)["providers"]
+
+
+def _cache_key(params: dict) -> str:
+    raw = json.dumps(params, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _normalize(record: dict) -> dict:
+    """Shrink a raw CMS record to the fields the agent needs."""
+    basic = record.get("basic", {}) or {}
+    taxonomies = record.get("taxonomies", []) or []
+    primary = next((t for t in taxonomies if t.get("primary")), taxonomies[0] if taxonomies else {})
+    addresses = record.get("addresses", []) or []
+    location = next(
+        (a for a in addresses if a.get("address_purpose") == "LOCATION"),
+        addresses[0] if addresses else {},
+    )
+    name = " ".join(
+        part for part in [basic.get("first_name", ""), basic.get("last_name", "")]
+        if part
+    ).strip()
+    if record.get("enumeration_type") == "NPI-2":
+        name = basic.get("organization_name", "") or name
+    return {
+        "npi": record.get("number", ""),
+        "name": name.title() if name else "Unknown",
+        "credential": basic.get("credential", ""),
+        "specialty": primary.get("desc", ""),
+        "taxonomy_code": primary.get("code", ""),
+        "organization": "",
+        "address": location.get("address_1", ""),
+        "city": location.get("city", ""),
+        "state": location.get("state", ""),
+        "zip": location.get("postal_code", ""),
+        "phone": location.get("telephone_number", ""),
+        "seed": False,
+    }
+
+
+class CMSClient:
+    """Search the NPI Registry with retries, caching and seed fallback."""
+
+    def __init__(
+        self,
+        db_path: str = "scheduler.db",
+        transport: httpx.BaseTransport | None = None,
+        enabled: bool = True,
+    ) -> None:
+        self._db_path = db_path
+        self._transport = transport
+        self._enabled = enabled
+
+    def _cached(self, key: str) -> list[dict] | None:
+        conn = store.connect(self._db_path)
+        try:
+            row = conn.execute(
+                "SELECT payload, fetched_at FROM providers_cache WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+            if row and time.time() - row["fetched_at"] < store.PROVIDER_CACHE_TTL_SECONDS:
+                return json.loads(row["payload"])
+            return None
+        finally:
+            conn.close()
+
+    def _store_cache(self, key: str, providers: list[dict]) -> None:
+        conn = store.connect(self._db_path)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO providers_cache "
+                "(cache_key, payload, fetched_at) VALUES (?, ?, ?)",
+                (key, json.dumps(providers), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _seed_fallback(
+        self, taxonomy_code: str | None, city: str | None, state: str | None, limit: int
+    ) -> list[dict]:
+        providers = _load_seed_providers()
+        out = []
+        for provider in providers:
+            if taxonomy_code and provider["taxonomy_code"] != taxonomy_code:
+                continue
+            if city and provider["city"].lower() != city.lower():
+                continue
+            if state and provider["state"].lower() != state.lower():
+                continue
+            # Seed entries store first/last name; the API shape needs a
+            # single display name, same as _normalize builds for CMS rows.
+            entry = dict(provider)
+            entry["name"] = " ".join(
+                part for part in [provider.get("first_name", ""), provider.get("last_name", "")]
+                if part
+            ).strip()
+            out.append(entry)
+            if len(out) >= limit:
+                break
+        return out
+
+    def search(
+        self,
+        taxonomy_code: str | None = None,
+        city: str | None = None,
+        state: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        limit: int = 10,
+    ) -> dict:
+        """Search providers. Returns ``{"providers": [...], "source": ...}``.
+
+        ``source`` is ``cms`` for a live result, ``cache`` for a cached one
+        and ``seed`` when CMS was unreachable or errored. State alone is
+        never sent to CMS (it would be rejected); callers must combine it
+        with city, taxonomy or a name.
+        """
+        params: dict[str, str | int] = {"version": VERSION, "limit": limit}
+        if taxonomy_code:
+            params["taxonomy_code"] = taxonomy_code
+        if city:
+            params["city"] = city
+        if state:
+            params["state"] = state
+        if first_name:
+            params["first_name"] = first_name
+        if last_name:
+            params["last_name"] = last_name
+        if state and not (city or taxonomy_code or first_name or last_name):
+            # CMS rejects state alone (error 07). Fall back to the seed list
+            # for the state instead of sending a request CMS will refuse.
+            logger.warning("CMS search with state alone is rejected; using seed fallback.")
+            return {
+                "providers": self._seed_fallback(taxonomy_code, city, state, limit),
+                "source": "seed",
+                "note": "State alone is not accepted by the CMS registry; seed providers shown.",
+            }
+
+        key = _cache_key(params)
+        cached = self._cached(key)
+        if cached is not None:
+            return {"providers": cached, "source": "cache"}
+
+        if not self._enabled:
+            return {
+                "providers": self._seed_fallback(taxonomy_code, city, state, limit),
+                "source": "seed",
+                "note": "CMS client disabled; seed providers shown.",
+            }
+
+        last_error: str | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                with httpx.Client(
+                    transport=self._transport, timeout=TIMEOUT_SECONDS
+                ) as client:
+                    response = client.get(BASE_URL, params=params)
+                response.raise_for_status()
+                data = response.json()
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+                # InvalidURL is NOT an HTTPError subclass (it derives from
+                # plain Exception) — it surfaces when the sandbox proxy
+                # config can't be parsed. Any transport failure falls back
+                # to the seed list, the same as CMS being unreachable.
+                last_error = str(exc)
+                logger.warning("CMS request failed (attempt %d): %s", attempt + 1, exc)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+                continue
+            errors = data.get("Errors") or []
+            if errors:
+                last_error = "; ".join(
+                    f"{e.get('number')}: {e.get('description')}" for e in errors
+                )
+                logger.warning("CMS returned errors: %s", last_error)
+                break
+            providers = [_normalize(r) for r in data.get("results", [])]
+            self._store_cache(key, providers)
+            return {"providers": providers, "source": "cms"}
+
+        return {
+            "providers": self._seed_fallback(taxonomy_code, city, state, limit),
+            "source": "seed",
+            "note": f"CMS unavailable ({last_error}); seed providers shown.",
+        }

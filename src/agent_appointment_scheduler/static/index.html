@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appointment Scheduler</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; color: #1a1a1a; background: #f6f6f4; }
+  header { background: #173a2f; color: #fff; padding: 14px 20px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: .8; }
+  main { display: grid; grid-template-columns: 240px 1fr 300px; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+  .panel h2 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: #555; }
+  #sessions button { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; cursor: pointer; font-size: 13px; }
+  #sessions button.active { border-color: #173a2f; background: #eef4f1; }
+  #sessions button .meta { display: block; font-size: 11px; color: #777; margin-top: 2px; }
+  #new-session { width: 100%; padding: 8px; margin-bottom: 10px; background: #173a2f; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  #chat-log { height: 52vh; overflow-y: auto; border: 1px solid #eee; border-radius: 6px; padding: 10px; margin-bottom: 10px; background: #fdfdfc; }
+  .msg { margin: 0 0 10px; white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
+  .msg.user { color: #173a2f; font-weight: 600; }
+  .msg.agent { color: #333; }
+  .msg .who { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #999; margin-bottom: 2px; }
+  #chat-form { display: flex; gap: 8px; }
+  #chat-input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  #chat-form button { padding: 10px 16px; background: #173a2f; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  .field { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
+  .field .k { color: #777; }
+  .field .v { font-weight: 600; text-align: right; }
+  .missing { color: #b3541e; }
+  #booking-summary { font-size: 13px; white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px; margin-top: 8px; }
+  #model-status { margin-top: 12px; font-size: 12px; color: #555; border-top: 1px solid #eee; padding-top: 10px; }
+  #model-status .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .hint { font-size: 12px; color: #888; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Appointment Scheduler</h1>
+  <p>Find a provider, book an appointment, change it later — one session, remembered.</p>
+</header>
+<main>
+  <section class="panel">
+    <h2>Sessions</h2>
+    <button id="new-session">+ New session</button>
+    <div id="sessions"></div>
+    <p class="hint">Pick a session to resume it — the agent remembers the booking, your preferences, and where you left off.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Chat</h2>
+    <div id="chat-log"></div>
+    <form id="chat-form">
+      <input id="chat-input" type="text" autocomplete="off" placeholder="I need a cardiologist near Minneapolis next week…">
+      <button type="submit">Send</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Booking</h2>
+    <div id="booking-card"><p class="hint">No booking in progress yet.</p></div>
+    <div id="model-status">
+      <h2 style="margin-bottom:6px">Model</h2>
+      <div class="row"><span>Prompt tokens</span><span id="m-prompt">—</span></div>
+      <div class="row"><span>Cached tokens</span><span id="m-cached">—</span></div>
+      <div class="row"><span>Cache hit rate</span><span id="m-hit">—</span></div>
+      <div class="row"><span>Est. saved</span><span id="m-saved">—</span></div>
+      <div class="row"><span>Skills loaded</span><span id="m-skills">—</span></div>
+    </div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
