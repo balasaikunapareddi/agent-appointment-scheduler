@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from pydantic import BaseModel, Field
 
@@ -142,6 +142,48 @@ def validate_phone(text: str) -> tuple[str | None, str | None]:
             "like 612-555-0147."
         )
     return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}", None
+
+
+def validate_dob(text: str) -> tuple[str | None, str | None]:
+    """Normalize a date of birth to YYYY-MM-DD, or return an error.
+
+    Strict on purpose: a date of birth is a fixed fact, not a relative
+    expression. Accepts YYYY-MM-DD, MM/DD/YYYY and 'Month D, YYYY'.
+    Rejects anything unparseable and any date in the future — the
+    natural-date parser would happily accept 'tomorrow' or 'next
+    Tuesday', which is never a real date of birth.
+    """
+    value = (text or "").strip()
+    parsed: date | None = None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y"):
+        try:
+            parsed = datetime.strptime(value, fmt).date()
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return None, (
+            "That date of birth doesn't look right — I need it like "
+            "1990-05-14 or 05/14/1990."
+        )
+    if parsed > date.today():
+        return None, "That date of birth is in the future — I need the real date of birth."
+    return parsed.isoformat(), None
+
+
+def validate_name(text: str) -> tuple[str | None, str | None]:
+    """Normalize a patient name, or return an error.
+
+    A name needs at least two characters and at least one letter —
+    'abc' is a name-shaped string but '1' or '...' is not, and an empty
+    string is never a name.
+    """
+    value = (text or "").strip()
+    if len(value) < 2:
+        return None, "I need the patient's full name."
+    if not any(ch.isalpha() for ch in value):
+        return None, "That doesn't look like a name — I need the patient's full name."
+    return value, None
 
 
 def parse_provider_choice(text: str, providers: list[dict]) -> dict | None:

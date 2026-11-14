@@ -1,6 +1,6 @@
 """SQLite persistence for the scheduling service.
 
-One database file holds everything, so the FastAPI service, the MCP server
+One database holds everything, so the FastAPI service, the MCP server
 and the agent all read the same source of truth. Tables:
 
 - ``providers_cache`` — CMS search results, TTL 24h.
@@ -15,17 +15,42 @@ and the agent all read the same source of truth. Tables:
 
 Retention: sessions and their messages expire after 30 days
 (``purge_expired``); patient records are deleted on request via the API.
+
+Where the database lives
+-----------------------
+Local file (default): plain sqlite3, exactly as before — this is what
+tests and local runs use.
+
+Remote (hosted): set ``SCHEDULER_DATABASE_URL`` to a ``libsql://`` URL
+and ``SCHEDULER_DATABASE_AUTH_TOKEN`` to its token (Turso free tier:
+no card, 5 GB). Render's free tier wipes local files on every
+spin-down, restart and redeploy, so a local ``scheduler.db`` is a cache
+that empties itself — bookings vanish, appointment ids restart at
+APT-1001, and the double-booking guard has nothing to check against.
+The hosted database is what makes a booking survive a restart.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 SESSION_TTL_SECONDS = 30 * 24 * 3600  # sessions expire after 30 days
 PROVIDER_CACHE_TTL_SECONDS = 24 * 3600  # CMS results cached for 24 hours
+
+REMOTE_URL_ENV = "SCHEDULER_DATABASE_URL"
+REMOTE_TOKEN_ENV = "SCHEDULER_DATABASE_AUTH_TOKEN"
+
+# Remote schema is ensured once per process per URL: every request opens
+# a fresh connection, and re-running the schema over the network each
+# time would be pure overhead. (Local files keep the old behaviour of
+# ensuring the schema on every connect — it is cheap and keeps temp-DB
+# tests hermetic.)
+_remote_schema_done: set[str] = set()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS providers_cache (
@@ -119,8 +144,163 @@ CREATE TABLE IF NOT EXISTS strands_agents (
 """
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    """Open the database, creating the schema on first use (WAL mode)."""
+class _Row:
+    """A ``sqlite3.Row`` look-alike for rows from the libsql adapter.
+
+    Supports index and name access, ``.keys()``, ``.get()``, iteration
+    over values, and ``dict(row)`` — everything the codebase asks of
+    ``sqlite3.Row``. (libsql returns plain tuples, so the adapter has to
+    add the names back.)
+    """
+
+    __slots__ = ("_values", "_names")
+
+    def __init__(self, values: tuple, names: tuple[str, ...]) -> None:
+        self._values = values
+        self._names = names
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            try:
+                return self._values[self._names.index(key)]
+            except ValueError:
+                raise IndexError(f"No item with that key: {key!r}") from None
+        return self._values[key]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def keys(self):
+        return list(self._names)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except (IndexError, KeyError):
+            return default
+
+    def __repr__(self) -> str:
+        return f"_Row({dict(self)!r})"
+
+
+class _Cursor:
+    """Wraps a libsql cursor; ``fetchone``/``fetchall`` return ``_Row``."""
+
+    def __init__(self, cursor) -> None:
+        self._cursor = cursor
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def _names(self) -> tuple[str, ...]:
+        return tuple(col[0] for col in (self._cursor.description or ()))
+
+    def _wrap(self, row):
+        if row is None:
+            return None
+        return _Row(tuple(row), self._names())
+
+    def fetchone(self):
+        return self._wrap(self._cursor.fetchone())
+
+    def fetchall(self):
+        return [self._wrap(row) for row in self._cursor.fetchall()]
+
+    def fetchmany(self, size=None):
+        rows = (
+            self._cursor.fetchmany(size)
+            if size is not None
+            else self._cursor.fetchmany()
+        )
+        return [self._wrap(row) for row in rows]
+
+    def __iter__(self):
+        for row in self._cursor:
+            yield self._wrap(row)
+
+    def close(self):
+        self._cursor.close()
+
+
+class _LibsqlConnection:
+    """Wraps a libsql connection so it quacks like ``sqlite3.Connection``.
+
+    The codebase only uses ``execute``/``executemany``/``executescript``,
+    ``commit``/``rollback`` and ``close`` (plus the context-manager
+    protocol), all of which libsql provides — the only gap is the row
+    shape, which ``_Cursor`` closes.
+    """
+
+    def __init__(self, connection) -> None:
+        self._conn = connection
+
+    def execute(self, sql, parameters=()):
+        return _Cursor(self._conn.execute(sql, parameters))
+
+    def executemany(self, sql, seq_of_parameters):
+        return _Cursor(self._conn.executemany(sql, seq_of_parameters))
+
+    def executescript(self, sql):
+        return _Cursor(self._conn.executescript(sql))
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    @property
+    def in_transaction(self):
+        return self._conn.in_transaction
+
+
+def connect(db_path: str | Path) -> Any:
+    """Open the database, creating the schema on first use (WAL mode).
+
+    Local file (default): plain sqlite3, exactly as before.
+    Remote (Turso): when ``SCHEDULER_DATABASE_URL`` is set to a
+    ``libsql://`` URL, connect to the hosted database instead — this is
+    what keeps bookings alive across Render free-tier spin-downs and
+    restarts. ``:memory:`` always stays local.
+    """
+    url = os.environ.get(REMOTE_URL_ENV, "").strip()
+    if url and str(db_path) != ":memory:":
+        import libsql
+
+        conn = _LibsqlConnection(
+            libsql.connect(
+                url,
+                auth_token=os.environ.get(REMOTE_TOKEN_ENV, ""),
+                timeout=30.0,
+            )
+        )
+        if url not in _remote_schema_done:
+            conn.executescript(SCHEMA)
+            conn.commit()
+            _remote_schema_done.add(url)
+        return conn
     path = Path(db_path)
     if str(path) != ":memory:" and path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)

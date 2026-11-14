@@ -44,8 +44,16 @@ the live agent, add `GEMINI_API_KEY` in the dashboard and remove
 `SCHEDULER_MOCK` (provider is already `gemini`).
 
 Free-tier notes: the instance sleeps after 15 minutes idle (~1 minute
-to wake on the next visit) and the SQLite database is ephemeral, so
-bookings reset on restart/redeploy.
+to wake on the next visit). The SQLite database is ephemeral — local
+files are wiped on every spin-down, restart and redeploy — so without
+a hosted database, bookings vanish, appointment ids restart at
+APT-1001, and the double-booking guard has nothing to check against
+(verified live, Nov 14: two sessions confirmed the same slot after a
+restart wiped the first booking). For a durable deploy, create a free
+Turso database (no card) and set `SCHEDULER_DATABASE_URL` (the
+`libsql://...` URL) and `SCHEDULER_DATABASE_AUTH_TOKEN` in the
+dashboard; the service then uses the hosted database and bookings
+survive restarts. Local runs and tests keep using the local file.
 
 ## How it works
 
@@ -174,6 +182,8 @@ so you can check. Nothing here is aspirational.
 | 13 | **Skill-based prompts (progressive disclosure)** | `skills/` (`find-providers`, `book-appointment`, `reschedule-cancel`, `session-memory`); `skills.py` — `load_skills`, `select_skills`; `agent.py` — native `AgentSkills` plugin | The agent always carries only the registry (names + one-line descriptions). A skill's full instructions load only when its intent matches, via the native Strands `AgentSkills` plugin and its `skills` tool. One big system prompt would pay for all four skills on every turn and bury the relevant instructions; progressive disclosure keeps the base prompt small and the relevant know-how close. Verified against the installed Strands 1.65.0 (`strands.vended_plugins.skills`). |
 | 14 | **Prompt caching** | `prompting.py` — `static_prefix`, `compose_system_prompt`, `extract_cache_metrics`; `hooks.py` — cache metrics in traces | The prompt is built static-first, dynamic-last: the base system prompt is byte-identical across turns, the session id/summary/preferences follow it, and the conversation history is appended at the end. OpenAI caches automatically (≥1,024 prompt tokens) and Gemini caches implicitly (LiteLLM's table lists 1,024 tokens minimum for both; Google's own docs note higher minimums, 2,048+, for some Gemini models). Cache reads cost roughly 10% of normal input price on both. Below the minimum the request is simply processed without caching — no error, no behaviour change. Caching is a cost/latency optimization, not a correctness feature: the agent works identically with caching off. |
 | 15 | **Deterministic crisis screen** | `crisis.py` — `detect_crisis`, `crisis_reply`; `chat.py` — `ChatService.chat` (screen runs before the agent is created) | An emergency must never be answered with a routine slot next week, and the model must never be the thing that decides whether "chest pain right now" is urgent. A narrow phrase list (chest pain, can't breathe, passed out, seizure, overdose, self-harm, …) matches before any model call; the reply is fixed text (call 911 / 988) and no tool is ever called on a crisis turn. A prompt-only rule can be talked around and can fail silently; a code check in the single entry point can't. The system prompt carries one backup line. A bare "pain" does not trigger; the list errs toward caution on purpose. |
+| 16 | **Durable hosted database (Turso)** | `store.py` — `connect` routes to libsql when `SCHEDULER_DATABASE_URL` is set; `_Row`/`_Cursor`/`_LibsqlConnection` adapter | Render's free tier wipes local files on every spin-down, restart and redeploy, so a local SQLite file is a cache that empties itself — bookings vanish, appointment ids restart at APT-1001, and the double-booking guard has nothing to check against (verified live Nov 14: two sessions confirmed the same slot after a restart wiped the first booking). Turso is still SQLite (libsql), so the same SQL and the same code run against it, and the free tier needs no card. The adapter exists because libsql returns plain tuples while the codebase reads `sqlite3.Row` (name access, `dict(row)`, `.get()`). Local runs and tests keep the plain sqlite3 file — the remote path only switches on when the env var is set. |
+| 17 | **Contact validation + session-scoped reads** | `slots.py` — `validate_name`, `validate_dob`, `validate_phone`; `mcp_server.py` — `create_patient_record`, `update_patient_contact`, `list_appointments`; `api.py` — `create_patient` | A garbage phone ("abc") once sailed past the form and the agent presented a different patient's record and asked to book it. The fix is threefold: name/dob/phone are validated deterministically before anything is stored (a date of birth is a fixed fact — the strict validator rejects "tomorrow" and future dates, which the natural-date parser would have accepted), and `list_appointments` without a patient on file returns nothing instead of the whole appointment book. A session must never see another patient's appointments. The skill file carries the same rule in words: repeat the exact validation error and ask again, never work around a rejected value. |
 
 ## Prompt caching, per provider
 

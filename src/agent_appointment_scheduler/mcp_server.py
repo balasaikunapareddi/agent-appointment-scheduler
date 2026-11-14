@@ -163,14 +163,28 @@ def create_patient_record(
     Sensitive values are encrypted at rest by the service. Only the
     patient reference (PAT-...) and masked values come back — the agent
     never sees or repeats the raw values.
+
+    Name, date of birth and phone are validated here, before anything
+    is stored, so a bad value comes back as a plain error the agent can
+    repeat to the user and ask again — never as a half-built record and
+    never as a reason to go looking for someone else's record.
     """
+    name, err = slot_logic.validate_name(full_name)
+    if err:
+        return {"ok": False, "error": err}
+    dob_norm, err = slot_logic.validate_dob(dob)
+    if err:
+        return {"ok": False, "error": err}
+    phone_norm, err = slot_logic.validate_phone(phone)
+    if err:
+        return {"ok": False, "error": err}
     result = _call(
         "POST",
         "/patients",
         {
-            "full_name": full_name,
-            "dob": dob,
-            "phone": phone,
+            "full_name": name,
+            "dob": dob_norm,
+            "phone": phone_norm,
             "member_id": member_id,
             "contact_method": contact_method,
         },
@@ -186,8 +200,9 @@ def create_patient_record(
         store.save_booking_form(session_id, form)
         # Persist the literals and re-redact the session's stored history
         # (the user message that gave the name was stored before this
-        # record existed).
-        store.register_session_sensitive_values(session_id, full_name, dob, phone, member_id)
+        # record existed). Register the normalized values — those are
+        # the ones the service stored.
+        store.register_session_sensitive_values(session_id, name, dob_norm, phone_norm, member_id)
     return {
         "ok": True,
         "patient_ref": result["patient_ref"],
@@ -200,8 +215,16 @@ def create_patient_record(
 
 @server.tool()
 def update_patient_contact(patient_ref: str, phone: str, session_id: str = "") -> dict:
-    """Update the phone number on a patient record (e.g. a correction)."""
-    result = _call("PATCH", f"/patients/{patient_ref}", {"phone": phone})
+    """Update the phone number on a patient record (e.g. a correction).
+
+    The new number is validated first: a correction that is not a real
+    10-digit number is rejected with a plain error instead of being
+    stored.
+    """
+    phone_norm, err = slot_logic.validate_phone(phone)
+    if err:
+        return {"ok": False, "error": err}
+    result = _call("PATCH", f"/patients/{patient_ref}", {"phone": phone_norm})
     if not result.get("ok"):
         return result
     if session_id:
@@ -347,19 +370,27 @@ def book_appointment(session_id: str, confirmed: bool = False, idempotency_key: 
 
 @server.tool()
 def list_appointments(session_id: str = "", patient_ref: str = "") -> dict:
-    """List appointments for this session's patient (or a given reference)."""
-    query = "/appointments"
-    if patient_ref:
-        query += f"?patient_ref={patient_ref}"
-    result = _call("GET", query)
+    """List appointments for this session's patient (or a given reference).
+
+    Scoped by design: without a patient reference — the one this
+    session collected, or one passed in explicitly — this returns an
+    empty list, never the whole appointment book. A session must never
+    see another patient's appointments.
+    """
+    ref = patient_ref
+    if not ref and session_id:
+        store, form = _form(session_id)
+        ref = form.patient_ref
+    if not ref:
+        return {
+            "ok": True,
+            "appointments": [],
+            "note": "No patient on file for this session yet — collect the patient's details first.",
+        }
+    result = _call("GET", f"/appointments?patient_ref={ref}")
     if not result.get("ok"):
         return result
-    items = result.get("items", [])
-    if session_id and not patient_ref:
-        store, form = _form(session_id)
-        if form.patient_ref:
-            items = [a for a in items if a.get("patient_ref") == form.patient_ref]
-    return {"ok": True, "appointments": items}
+    return {"ok": True, "appointments": result.get("items", [])}
 
 
 @server.tool()

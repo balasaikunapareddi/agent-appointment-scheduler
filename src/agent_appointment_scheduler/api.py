@@ -398,11 +398,9 @@ def create_patient(body: PatientCreate, conn: sqlite3.Connection = Depends(get_c
     phone, err = slots.validate_phone(body.phone)
     if err:
         raise HTTPException(status_code=422, detail=err)
-    dob_parsed = slots.parse_natural_date(body.dob)
-    if dob_parsed is None:
-        raise HTTPException(
-            status_code=422, detail="Date of birth must be YYYY-MM-DD or MM/DD/YYYY."
-        )
+    dob_parsed, err = slots.validate_dob(body.dob)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
     if body.contact_method not in ("text", "call", "email"):
         raise HTTPException(
             status_code=422, detail="contact_method must be text, call, or email."
@@ -414,7 +412,7 @@ def create_patient(body: PatientCreate, conn: sqlite3.Connection = Depends(get_c
         (
             patient_ref,
             crypto.encrypt_field(body.full_name.strip()),
-            crypto.encrypt_field(dob_parsed.isoformat()),
+            crypto.encrypt_field(dob_parsed),
             crypto.encrypt_field(phone),
             crypto.encrypt_field(body.member_id.strip()) if body.member_id else None,
             body.contact_method,
@@ -426,7 +424,7 @@ def create_patient(body: PatientCreate, conn: sqlite3.Connection = Depends(get_c
     return PatientOut(
         patient_ref=patient_ref,
         name_masked=mask_name(body.full_name),
-        dob_masked=mask_dob(dob_parsed.isoformat()),
+        dob_masked=mask_dob(dob_parsed),
         phone_masked=mask_phone(phone),
         member_id_masked=mask_member_id(body.member_id) if body.member_id else None,
         contact_method=body.contact_method,
