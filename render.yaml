@@ -13,6 +13,7 @@ services:
   - type: web
     name: agent-appointment-scheduler
     env: python
+    plan: free
     buildCommand: pip install -e .
     startCommand: SCHEDULER_API_PORT=$PORT uvicorn agent_appointment_scheduler.api:app --host 0.0.0.0 --port $PORT
     envVars:
