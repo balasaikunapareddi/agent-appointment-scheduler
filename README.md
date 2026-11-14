@@ -50,11 +50,13 @@ flowchart LR
 ```
 
 - **Real provider search.** The CMS NPI Registry API (free, no key) is
-  queried by taxonomy code — cardiology is `207RC0000X`, family
-  medicine `207Q00000X`. The registry rejects a bare state search, so
-  state is always combined with a city, a taxonomy, or a name. Results
-  are cached for 24 hours; if CMS is unreachable the demo falls back to
-  a local seed list (marked as such) so it never dies.
+  queried by taxonomy description — cardiology is "Cardiovascular
+  Disease", family medicine "Family Medicine" (the registry has no
+  `taxonomy_code` search field and silently ignores it). The registry
+  rejects a bare state search, so state is always combined with a city,
+  a taxonomy, or a name. Results are cached for 24 hours; if CMS is
+  unreachable the demo falls back to a local seed list (marked as such)
+  so it never dies.
 - **FastAPI scheduling service** (`src/agent_appointment_scheduler/api.py`).
   The system of record: providers, availability (Mon–Fri, 30-minute
   slots, deterministic pseudo-availability), 10-minute slot holds,

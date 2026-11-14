@@ -14,12 +14,14 @@ tool.
 
 - Ask for (or infer from the conversation) a specialty and a city. The
   demo default is Minneapolis, MN.
-- Search by specialty using the taxonomy CODE, not the word: cardiology
-  is 207RC0000X, family medicine is 207Q00000X, internal medicine is
-  207R00000X, obstetrics & gynecology is 207V00000X. The tool maps the
-  spoken specialty to the code for you — just pass the specialty name.
+- Search by specialty name: cardiology, family medicine, internal
+  medicine, obstetrics & gynecology. The tool maps the spoken specialty
+  to the taxonomy description CMS searches on ("Cardiovascular Disease",
+  "Family Medicine", …) — just pass the specialty name. Do NOT pass a
+  taxonomy code: the registry has no `taxonomy_code` search field and
+  silently ignores it, returning unfiltered results.
 - The CMS registry rejects a bare state search ("state requires additional
-  search criteria"). Always combine state with a city, a taxonomy code,
+  search criteria"). Always combine state with a city, a taxonomy,
   or a name.
 - Results may come from the live registry, the local cache, or the seed
   list when CMS is unreachable. Seed results are marked `seed: true` —

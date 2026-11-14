@@ -44,7 +44,10 @@ def test_select_skills_reschedule_turn():
 
 def test_skill_instructions_content():
     text = skill_instructions("find-providers")
-    assert "207RC0000X" in text
+    # The skill teaches the taxonomy DESCRIPTION CMS searches on, not the
+    # code — CMS v2.1 has no taxonomy_code search field.
+    assert "Cardiovascular Disease" in text
+    assert "207RC0000X" not in text
     assert "book-appointment" not in skill_instructions("find-providers")
     booking = skill_instructions("book-appointment")
     assert "confirmed=true" in booking

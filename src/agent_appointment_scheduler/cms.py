@@ -3,7 +3,12 @@
 Free, no key. Rules learned from the live API and encoded here:
 - ``state`` alone is rejected (error 07: "Field state requires additional
   search criteria") — always combine it with city, taxonomy, or a name.
-- Specialties are taxonomy CODES, not words: pass e.g. 207RC0000X.
+- CMS v2.1 has NO ``taxonomy_code`` search field: sending it is silently
+  ignored and the registry returns an unfiltered list (verified live
+  2026-11-14 — a "cardiology" search returned nurses, social workers and
+  a chiropractor). Specialty search uses ``taxonomy_description`` instead
+  (e.g. "Cardiovascular Disease"). Taxonomy CODES are still kept for the
+  local seed fallback, which filters on them.
 - Responses may carry an ``Errors`` array instead of ``results``.
 - Retries with backoff, a hard timeout, and a 24h local cache. When CMS
   is unreachable or returns an error, fall back to local seed providers
@@ -31,7 +36,7 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 # Specialty name -> taxonomy code (NUCC). The display name is what the user
-# says; the code is what CMS searches on.
+# says; the code is what the local seed fallback filters on.
 SPECIALTIES: dict[str, str] = {
     "cardiology": "207RC0000X",
     "cardiovascular disease": "207RC0000X",
@@ -44,6 +49,16 @@ SPECIALTIES: dict[str, str] = {
     "ob/gyn": "207V00000X",
     "obstetrics": "207V00000X",
     "gynecology": "207V00000X",
+}
+
+# Taxonomy code -> the description CMS v2.1 actually searches on
+# (``taxonomy_description``). Every value here was verified live against
+# the registry 2026-11-14: each returns providers whose taxonomy matches.
+TAXONOMY_DESCRIPTIONS: dict[str, str] = {
+    "207RC0000X": "Cardiovascular Disease",
+    "207Q00000X": "Family Medicine",
+    "207R00000X": "Internal Medicine",
+    "207V00000X": "Obstetrics & Gynecology",
 }
 
 DEFAULT_CITY = "Minneapolis"
@@ -63,6 +78,19 @@ def taxonomy_code_for(specialty: str) -> str | None:
     if cleaned.upper() in SPECIALTIES.values():
         return cleaned.upper()
     return SPECIALTIES.get(cleaned.lower())
+
+
+def taxonomy_description_for(taxonomy_code: str | None) -> str | None:
+    """Resolve a taxonomy code to the description CMS searches on.
+
+    CMS v2.1 has no ``taxonomy_code`` search field, so the code itself
+    is never sent to the registry — this description is, via
+    ``taxonomy_description``. Returns None for an unknown code; callers
+    then search without a specialty filter (city/state still apply).
+    """
+    if not taxonomy_code:
+        return None
+    return TAXONOMY_DESCRIPTIONS.get(taxonomy_code.strip().upper())
 
 
 def _load_seed_providers() -> list[dict]:
@@ -193,8 +221,12 @@ class CMSClient:
         # cardiologist. Results are also filtered below in case a record
         # is explicitly marked NPI-2 (e.g. from an older cache).
         params["enumeration_type"] = "NPI-1"
-        if taxonomy_code:
-            params["taxonomy_code"] = taxonomy_code
+        # CMS v2.1 silently ignores a taxonomy_code parameter, so search
+        # by taxonomy_description instead (see module docstring). The code
+        # is still kept for the seed fallback, which filters on it.
+        taxonomy_description = taxonomy_description_for(taxonomy_code)
+        if taxonomy_description:
+            params["taxonomy_description"] = taxonomy_description
         if city:
             params["city"] = city
         if state:

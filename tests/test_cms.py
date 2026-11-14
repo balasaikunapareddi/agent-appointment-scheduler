@@ -44,8 +44,10 @@ def test_search_maps_taxonomy_and_normalizes(db_path):
     assert provider["name"] == "Muhannad Abbasi"
     assert provider["specialty"] == "Cardiovascular Disease"
     assert provider["city"] == "Minneapolis"
-    # The taxonomy code, not the word, went to CMS.
-    assert seen["params"]["taxonomy_code"] == "207RC0000X"
+    # CMS v2.1 has no taxonomy_code search field — it silently ignores
+    # it. The taxonomy DESCRIPTION is what goes to CMS.
+    assert seen["params"]["taxonomy_description"] == "Cardiovascular Disease"
+    assert "taxonomy_code" not in seen["params"]
 
 
 def test_taxonomy_code_for():
@@ -57,6 +59,32 @@ def test_taxonomy_code_for():
     # live and got a 400 before the fix).
     assert cms.taxonomy_code_for("207RC0000X") == "207RC0000X"
     assert cms.taxonomy_code_for("207q00000x") == "207Q00000X"
+
+
+def test_taxonomy_description_for():
+    assert cms.taxonomy_description_for("207RC0000X") == "Cardiovascular Disease"
+    assert cms.taxonomy_description_for("207q00000x") == "Family Medicine"
+    assert cms.taxonomy_description_for("207R00000X") == "Internal Medicine"
+    assert cms.taxonomy_description_for("207V00000X") == "Obstetrics & Gynecology"
+    assert cms.taxonomy_description_for("9999999999") is None
+    assert cms.taxonomy_description_for(None) is None
+
+
+def test_unknown_taxonomy_code_searches_without_taxonomy_filter(db_path):
+    # CMS has no taxonomy_code field; an unmapped code must not be sent
+    # at all (it would be silently ignored) — the city/state filters
+    # still apply.
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json=_cms_payload())
+
+    client = cms.CMSClient(db_path=db_path, transport=httpx.MockTransport(handler))
+    client.search(taxonomy_code="9999999999", city="Minneapolis", state="MN")
+    assert "taxonomy_code" not in seen["params"]
+    assert "taxonomy_description" not in seen["params"]
+    assert seen["params"]["city"] == "Minneapolis"
 
 
 def test_search_requests_individuals_only(db_path):

@@ -114,7 +114,7 @@ def search_providers(specialty: str, city: str = "Minneapolis", state: str = "MN
     """Find providers by specialty and city, from the CMS NPI Registry.
 
     Pass a specialty name like 'cardiology' or 'family medicine' — the
-    service maps it to the CMS taxonomy code. Returns providers with
+    service maps it to the CMS taxonomy description. Returns providers with
     name, specialty, city, and phone, numbered for follow-ups.
     """
     result = _call(
