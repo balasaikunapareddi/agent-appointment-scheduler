@@ -1,0 +1,24 @@
+# Render Blueprint — free tier. Deploys the FastAPI scheduler + chat UI
+# as a public web service, straight from this repo. No key needed:
+# SCHEDULER_MOCK=1 runs the scripted model so the whole flow (search,
+# availability, booking, memory) works out of the box. For the live
+# agent, set GEMINI_API_KEY in the Render dashboard and remove
+# SCHEDULER_MOCK (keep SCHEDULER_PROVIDER=gemini).
+#
+# Free-tier notes: the instance spins down after 15 minutes idle and
+# takes ~1 minute to wake on the next visit; the SQLite database lives
+# on ephemeral disk, so bookings reset on restart/redeploy. Fine for a
+# demo — add a paid persistent disk for real use.
+services:
+  - type: web
+    name: agent-appointment-scheduler
+    env: python
+    buildCommand: pip install -e .
+    startCommand: SCHEDULER_API_PORT=$PORT uvicorn agent_appointment_scheduler.api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: SCHEDULER_PROVIDER
+        value: gemini
+      - key: SCHEDULER_MOCK
+        value: "1"

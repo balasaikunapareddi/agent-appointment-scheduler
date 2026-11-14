@@ -34,6 +34,19 @@ make eval          # deterministic eval scenarios, offline
 
 Keys go in a `.env` file (copy `.env.example`). Never commit it.
 
+## Deploy (Render, free tier)
+
+The repo ships a `render.yaml` Blueprint: connect the repo in the
+Render dashboard (New → Blueprint) and it deploys as a public web
+service — no credit card, no key needed. It starts in scripted-mock
+mode (`SCHEDULER_MOCK=1`), so the whole flow works immediately. For
+the live agent, add `GEMINI_API_KEY` in the dashboard and remove
+`SCHEDULER_MOCK` (provider is already `gemini`).
+
+Free-tier notes: the instance sleeps after 15 minutes idle (~1 minute
+to wake on the next visit) and the SQLite database is ephemeral, so
+bookings reset on restart/redeploy.
+
 ## How it works
 
 ```mermaid
