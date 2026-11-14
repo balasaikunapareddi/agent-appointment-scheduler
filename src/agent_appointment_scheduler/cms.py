@@ -51,10 +51,18 @@ DEFAULT_STATE = "MN"
 
 
 def taxonomy_code_for(specialty: str) -> str | None:
-    """Resolve a spoken specialty to its taxonomy code, or None."""
+    """Resolve a spoken specialty to its taxonomy code, or None.
+
+    Accepts a name ("cardiology") or a code passed through as the
+    specialty ("207RC0000X") — the agent tried the code form live and
+    got a 400, so both spellings resolve here.
+    """
     if not specialty:
         return None
-    return SPECIALTIES.get(specialty.strip().lower())
+    cleaned = specialty.strip()
+    if cleaned.upper() in SPECIALTIES.values():
+        return cleaned.upper()
+    return SPECIALTIES.get(cleaned.lower())
 
 
 def _load_seed_providers() -> list[dict]:
@@ -178,6 +186,13 @@ class CMSClient:
         with city, taxonomy or a name.
         """
         params: dict[str, str | int] = {"version": VERSION, "limit": limit}
+        # Appointments are booked with a person, not an organization:
+        # ask CMS for individual providers (NPI-1) only. Without this the
+        # registry returns organizational listings (NPI-2) too, and the
+        # live demo booked "1 Steptransitionsservices" — an org, not a
+        # cardiologist. Results are also filtered below in case a record
+        # is explicitly marked NPI-2 (e.g. from an older cache).
+        params["enumeration_type"] = "NPI-1"
         if taxonomy_code:
             params["taxonomy_code"] = taxonomy_code
         if city:
@@ -236,7 +251,11 @@ class CMSClient:
                 )
                 logger.warning("CMS returned errors: %s", last_error)
                 break
-            providers = [_normalize(r) for r in data.get("results", [])]
+            providers = [
+                _normalize(r)
+                for r in data.get("results", [])
+                if r.get("enumeration_type", "NPI-1") == "NPI-1"
+            ]
             self._store_cache(key, providers)
             return {"providers": providers, "source": "cms"}
 

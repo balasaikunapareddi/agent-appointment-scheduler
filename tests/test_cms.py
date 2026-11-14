@@ -53,6 +53,53 @@ def test_taxonomy_code_for():
     assert cms.taxonomy_code_for("Cardiologist") == "207RC0000X"
     assert cms.taxonomy_code_for("family medicine") == "207Q00000X"
     assert cms.taxonomy_code_for("not a specialty") is None
+    # A code passed as the specialty resolves too (the agent tried this
+    # live and got a 400 before the fix).
+    assert cms.taxonomy_code_for("207RC0000X") == "207RC0000X"
+    assert cms.taxonomy_code_for("207q00000x") == "207Q00000X"
+
+
+def test_search_requests_individuals_only(db_path):
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json=_cms_payload())
+
+    client = cms.CMSClient(db_path=db_path, transport=httpx.MockTransport(handler))
+    client.search(taxonomy_code="207RC0000X", city="Minneapolis", state="MN")
+    assert seen["params"]["enumeration_type"] == "NPI-1"
+
+
+def test_organizations_dropped_from_results(db_path):
+    payload = _cms_payload()
+    payload["results"].append(
+        {
+            "number": "1831998038",
+            "enumeration_type": "NPI-2",
+            "basic": {"organization_name": "1 Steptransitionsservices"},
+            "taxonomies": [{"code": "207RC0000X", "desc": "Cardiovascular Disease"}],
+            "addresses": [
+                {
+                    "address_1": "1 Main St",
+                    "city": "Minneapolis",
+                    "state": "MN",
+                    "postal_code": "55401",
+                    "telephone_number": "612-555-0100",
+                }
+            ],
+        }
+    )
+    payload["results"][0]["enumeration_type"] = "NPI-1"
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    client = cms.CMSClient(db_path=db_path, transport=httpx.MockTransport(handler))
+    result = client.search(taxonomy_code="207RC0000X", city="Minneapolis", state="MN")
+    assert result["source"] == "cms"
+    names = [p["name"] for p in result["providers"]]
+    assert names == ["Muhannad Abbasi"], "an organization must never be bookable"
 
 
 def test_state_alone_never_hits_cms(db_path):
